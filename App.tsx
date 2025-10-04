@@ -8,6 +8,9 @@ import type {
   SavedConversation,
   Summary,
   QuestAssessment,
+  StudentProgressSnapshot,
+  QuestStatus,
+  MasteryLevel,
 } from './types';
 
 import CharacterSelector from './components/CharacterSelector';
@@ -18,6 +21,7 @@ import QuestsView from './components/QuestsView';
 import Instructions from './components/Instructions';
 import QuestIcon from './components/icons/QuestIcon';
 import QuestCreator from './components/QuestCreator'; // NEW
+import StudentProgressPanel from './components/StudentProgressPanel';
 
 import { CHARACTERS, QUESTS } from './constants';
 
@@ -25,6 +29,39 @@ const CUSTOM_CHARACTERS_KEY = 'school-of-the-ancients-custom-characters';
 const HISTORY_KEY = 'school-of-the-ancients-history';
 const COMPLETED_QUESTS_KEY = 'school-of-the-ancients-completed-quests';
 const CUSTOM_QUESTS_KEY = 'school-of-the-ancients-custom-quests';
+const STUDENT_PROGRESS_KEY = 'school-of-the-ancients-student-progress';
+
+const masteryOrder: MasteryLevel[] = ['novice', 'apprentice', 'adept', 'master'];
+
+const masteryLabelMap: Record<MasteryLevel, string> = {
+  novice: 'Novice',
+  apprentice: 'Apprentice',
+  adept: 'Adept',
+  master: 'Master',
+};
+
+const createEmptyProgress = (): StudentProgressSnapshot => ({
+  quests: {},
+  subjects: {},
+  achievements: [],
+});
+
+const determineMasteryLevel = (completed: number, total: number): MasteryLevel => {
+  if (total <= 0) {
+    return 'novice';
+  }
+  const ratio = completed / total;
+  if (ratio >= 1) {
+    return 'master';
+  }
+  if (ratio >= 0.75) {
+    return 'adept';
+  }
+  if (ratio >= 0.5) {
+    return 'apprentice';
+  }
+  return 'novice';
+};
 
 // ---- Local storage helpers -------------------------------------------------
 
@@ -89,6 +126,60 @@ const saveCustomQuests = (quests: Quest[]) => {
   }
 };
 
+const loadStudentProgress = (): StudentProgressSnapshot => {
+  try {
+    const stored = localStorage.getItem(STUDENT_PROGRESS_KEY);
+    if (!stored) {
+      return createEmptyProgress();
+    }
+    const parsed = JSON.parse(stored);
+    return {
+      quests: parsed?.quests ?? {},
+      subjects: parsed?.subjects ?? {},
+      achievements: Array.isArray(parsed?.achievements) ? parsed.achievements : [],
+    };
+  } catch (error) {
+    console.error('Failed to load student progress:', error);
+    return createEmptyProgress();
+  }
+};
+
+const saveStudentProgress = (progress: StudentProgressSnapshot) => {
+  try {
+    localStorage.setItem(STUDENT_PROGRESS_KEY, JSON.stringify(progress));
+  } catch (error) {
+    console.error('Failed to save student progress:', error);
+  }
+};
+
+interface ProgressUpdateParams {
+  status?: QuestStatus;
+  assessment?: QuestAssessment | null;
+  transcriptLength?: number;
+  nextSteps?: string[];
+}
+
+const QUEST_COMPLETION_MILESTONES = [
+  {
+    count: 1,
+    id: 'milestone-quest-1',
+    title: 'First Footsteps',
+    description: 'Completed your first learning quest.',
+  },
+  {
+    count: 3,
+    id: 'milestone-quest-3',
+    title: 'Quest Explorer',
+    description: 'Completed three quests guided by the ancients.',
+  },
+  {
+    count: 5,
+    id: 'milestone-quest-5',
+    title: 'Quest Champion',
+    description: 'Completed five quests and unlocked deeper wisdom.',
+  },
+];
+
 // ---- App -------------------------------------------------------------------
 
 const App: React.FC = () => {
@@ -110,8 +201,215 @@ const App: React.FC = () => {
   const [lastQuestOutcome, setLastQuestOutcome] = useState<QuestAssessment | null>(null);
   const [inProgressQuestIds, setInProgressQuestIds] = useState<string[]>([]);
   const [questCreatorPrefill, setQuestCreatorPrefill] = useState<string | null>(null);
+  const [studentProgress, setStudentProgress] = useState<StudentProgressSnapshot>(createEmptyProgress());
 
   const allQuests = useMemo(() => [...customQuests, ...QUESTS], [customQuests]);
+  const subjectQuestCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    allQuests.forEach((quest) => {
+      const key = quest.objective.trim().toLowerCase() || quest.id;
+      counts[key] = (counts[key] ?? 0) + 1;
+    });
+    return counts;
+  }, [allQuests]);
+
+  useEffect(() => {
+    setStudentProgress(loadStudentProgress());
+  }, []);
+
+  const updateStudentProgress = useCallback(
+    (updater: (prev: StudentProgressSnapshot) => StudentProgressSnapshot) => {
+      setStudentProgress((prev) => {
+        const next = updater(prev);
+        if (next === prev) {
+          return prev;
+        }
+        saveStudentProgress(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    updateStudentProgress((prev) => {
+      let changed = false;
+      const subjects = { ...prev.subjects };
+      Object.entries(subjects).forEach(([key, subject]) => {
+        const updatedTotal = subjectQuestCounts[key];
+        if (typeof updatedTotal === 'number' && updatedTotal > 0 && updatedTotal !== subject.totalQuests) {
+          subjects[key] = {
+            ...subject,
+            totalQuests: Math.max(updatedTotal, subject.completedQuests),
+          };
+          changed = true;
+        }
+      });
+      if (!changed) {
+        return prev;
+      }
+      return {
+        ...prev,
+        subjects,
+      };
+    });
+  }, [subjectQuestCounts, updateStudentProgress]);
+
+  const applyQuestProgressUpdate = useCallback(
+    (quest: Quest, params: ProgressUpdateParams) => {
+      updateStudentProgress((prev) => {
+        const now = Date.now();
+        const objectiveKey = quest.objective.trim().toLowerCase() || quest.id;
+        const previousRecord = prev.quests[quest.id];
+        const previousSubject = prev.subjects[objectiveKey];
+
+        const transcriptStatus =
+          params.transcriptLength && params.transcriptLength > 1 ? 'in_progress' : previousRecord?.status ?? 'not_started';
+
+        let computedStatus: QuestStatus = params.status
+          ? params.status
+          : params.assessment?.passed
+            ? 'completed'
+            : params.assessment
+              ? 'in_progress'
+              : transcriptStatus;
+
+        if (previousRecord?.status === 'completed' && computedStatus !== 'completed') {
+          computedStatus = 'completed';
+        }
+
+        const normalizedSteps = (params.assessment
+          ? params.assessment.improvements
+          : params.nextSteps ?? previousRecord?.nextSteps ?? [])
+          .map((step) => step.trim())
+          .filter(Boolean);
+
+        const quests = { ...prev.quests };
+        const record = {
+          questId: quest.id,
+          questTitle: quest.title,
+          characterId: quest.characterId,
+          objective: quest.objective,
+          objectiveKey,
+          status: computedStatus,
+          lastUpdated: now,
+          lastAssessment: params.assessment ?? previousRecord?.lastAssessment,
+          nextSteps: computedStatus === 'completed' ? [] : normalizedSteps,
+        };
+        quests[quest.id] = record;
+
+        const subjectRecords = Object.values(quests).filter((entry) => entry.objectiveKey === objectiveKey);
+        const completedForSubject = subjectRecords.filter((entry) => entry.status === 'completed').length;
+        const baseTotal = subjectQuestCounts[objectiveKey] ?? (subjectRecords.length || 1);
+        const resolvedTotal = Math.max(baseTotal, subjectRecords.length || 1, completedForSubject || 1);
+        const aggregatedNextSteps = Array.from(
+          new Set(
+            subjectRecords
+              .filter((entry) => entry.status !== 'completed')
+              .flatMap((entry) => entry.nextSteps)
+              .filter((step) => step && step.trim().length > 0)
+          )
+        );
+
+        const subjects = { ...prev.subjects };
+        const subject = {
+          subjectId: objectiveKey,
+          subjectName: quest.objective,
+          totalQuests: resolvedTotal,
+          completedQuests: completedForSubject,
+          masteryLevel: determineMasteryLevel(completedForSubject, resolvedTotal),
+          lastUpdated: now,
+          nextSteps: aggregatedNextSteps,
+          recentQuestTitle: quest.title,
+        };
+        subjects[objectiveKey] = subject;
+
+        let achievements = [...prev.achievements];
+        const pushAchievement = (
+          id: string,
+          title: string,
+          description: string,
+          questId?: string,
+          subjectId?: string
+        ) => {
+          if (achievements.some((existing) => existing.id === id)) {
+            return;
+          }
+          achievements = [
+            ...achievements,
+            {
+              id,
+              title,
+              description,
+              earnedAt: now,
+              questId,
+              subjectId,
+            },
+          ];
+        };
+
+        if (params.assessment?.passed) {
+          const description = params.assessment.summary?.trim()
+            ? params.assessment.summary.trim()
+            : `Mastered the quest objective: ${quest.objective}.`;
+          pushAchievement(
+            `quest-${quest.id}-completed`,
+            `Conquered: ${quest.title}`,
+            description,
+            quest.id,
+            objectiveKey
+          );
+        } else if (params.assessment && params.assessment.improvements.length > 0) {
+          pushAchievement(
+            `quest-${quest.id}-growth`,
+            `Growth Path: ${quest.title}`,
+            'Mapped out clear next steps with your mentor for continued progress.',
+            quest.id,
+            objectiveKey
+          );
+        }
+
+        const previousMastery = previousSubject?.masteryLevel ?? 'novice';
+        if (masteryOrder.indexOf(subject.masteryLevel) > masteryOrder.indexOf(previousMastery)) {
+          const masteryTitle =
+            subject.masteryLevel === 'master'
+              ? `${subject.subjectName} Master`
+              : `${subject.subjectName} ${masteryLabelMap[subject.masteryLevel]}`;
+          pushAchievement(
+            `subject-${objectiveKey}-${subject.masteryLevel}`,
+            masteryTitle,
+            `Advanced to the ${masteryLabelMap[subject.masteryLevel]} tier in ${subject.subjectName}.`,
+            undefined,
+            objectiveKey
+          );
+        }
+
+        const totalCompleted = Object.values(quests).filter((entry) => entry.status === 'completed').length;
+        QUEST_COMPLETION_MILESTONES.forEach((milestone) => {
+          if (totalCompleted >= milestone.count) {
+            pushAchievement(milestone.id, milestone.title, milestone.description);
+          }
+        });
+
+        achievements.sort((a, b) => b.earnedAt - a.earnedAt);
+
+        return {
+          ...prev,
+          quests,
+          subjects,
+          achievements,
+        };
+      });
+    },
+    [subjectQuestCounts, updateStudentProgress]
+  );
+
+  const markQuestInProgress = useCallback(
+    (quest: Quest) => {
+      applyQuestProgressUpdate(quest, { status: 'in_progress' });
+    },
+    [applyQuestProgressUpdate]
+  );
 
   const syncQuestProgress = useCallback(() => {
     const history = loadConversations();
@@ -181,6 +479,7 @@ const App: React.FC = () => {
       setSelectedCharacter(characterForQuest);
       setView('conversation');
       setResumeConversationId(null);
+      markQuestInProgress(quest);
       const url = new URL(window.location.href);
       url.searchParams.set('character', characterForQuest.id);
       window.history.pushState({}, '', url);
@@ -198,8 +497,16 @@ const App: React.FC = () => {
       console.warn(`Quest with ID ${questId} could not be found for continuation.`);
       return;
     }
+    markQuestInProgress(questToResume);
     handleSelectQuest(questToResume);
   };
+
+  const handleProgressQuestContinue = useCallback(
+    (questId: string) => {
+      handleContinueQuest(questId);
+    },
+    [handleContinueQuest]
+  );
 
   const handleResumeConversation = (conversation: SavedConversation) => {
     const allCharacters = [...customCharacters, ...CHARACTERS];
@@ -218,6 +525,7 @@ const App: React.FC = () => {
       const questToResume = allQuests.find((quest) => quest.id === conversation.questId);
       if (questToResume) {
         setActiveQuest(questToResume);
+        markQuestInProgress(questToResume);
       } else {
         console.warn(`Quest with ID ${conversation.questId} not found while resuming conversation.`);
         setActiveQuest(null);
@@ -285,6 +593,58 @@ const App: React.FC = () => {
     setInProgressQuestIds((prev) => prev.filter((id) => id !== questId));
 
     setActiveQuest((current) => (current?.id === questId ? null : current));
+
+    updateStudentProgress((prev) => {
+      if (!prev.quests[questId]) {
+        return prev;
+      }
+
+      const quests = { ...prev.quests };
+      const record = quests[questId];
+      delete quests[questId];
+
+      const subjects = { ...prev.subjects };
+      let achievements = prev.achievements.filter((achievement) => achievement.questId !== questId);
+
+      if (record) {
+        const objectiveKey = record.objectiveKey;
+        const remainingRecords = Object.values(quests).filter((entry) => entry.objectiveKey === objectiveKey);
+        if (remainingRecords.length === 0) {
+          delete subjects[objectiveKey];
+        } else {
+          const completedForSubject = remainingRecords.filter((entry) => entry.status === 'completed').length;
+          const aggregatedNextSteps = Array.from(
+            new Set(
+              remainingRecords
+                .filter((entry) => entry.status !== 'completed')
+                .flatMap((entry) => entry.nextSteps)
+                .filter((step) => step && step.trim().length > 0)
+            )
+          );
+          const updatedTotal = subjectQuestCounts[objectiveKey] ?? (remainingRecords.length || 1);
+          const resolvedTotal = Math.max(updatedTotal, remainingRecords.length || 1, completedForSubject || 1);
+          const existingSubject = subjects[objectiveKey];
+          subjects[objectiveKey] = {
+            subjectId: objectiveKey,
+            subjectName: existingSubject?.subjectName ?? record.objective,
+            totalQuests: resolvedTotal,
+            completedQuests: completedForSubject,
+            masteryLevel: determineMasteryLevel(completedForSubject, resolvedTotal),
+            lastUpdated: Date.now(),
+            nextSteps: aggregatedNextSteps,
+            recentQuestTitle: remainingRecords[0]?.questTitle ?? existingSubject?.recentQuestTitle,
+          };
+        }
+        achievements = achievements.filter((achievement) => achievement.subjectId !== objectiveKey || subjects[objectiveKey]);
+      }
+
+      return {
+        ...prev,
+        quests,
+        subjects,
+        achievements,
+      };
+    });
   };
 
   const openQuestCreator = (goal?: string | null) => {
@@ -327,6 +687,7 @@ const App: React.FC = () => {
     setSelectedCharacter(mentor);
     setView('conversation');
     setResumeConversationId(null);
+    markQuestInProgress(quest);
     const url = new URL(window.location.href);
     url.searchParams.set('character', mentor.id);
     window.history.pushState({}, '', url);
@@ -500,6 +861,12 @@ Focus only on the student's contributions. Mark passed=true only if the learner 
       }
 
       saveConversationToLocalStorage(updatedConversation);
+      if (activeQuest) {
+        applyQuestProgressUpdate(activeQuest, {
+          assessment: questAssessment,
+          transcriptLength: transcript.length,
+        });
+      }
       syncQuestProgress();
     } catch (error) {
       console.error('Failed to finalize conversation:', error);
@@ -615,6 +982,13 @@ Focus only on the student's contributions. Mark passed=true only if the learner 
                 />
               </div>
             </div>
+
+            <StudentProgressPanel
+              progress={studentProgress}
+              quests={allQuests}
+              onContinueQuest={handleProgressQuestContinue}
+              onCreateQuestFromSteps={handleCreateQuestFromNextSteps}
+            />
 
             {lastQuestOutcome && (
               <div

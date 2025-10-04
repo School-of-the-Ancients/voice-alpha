@@ -96,3 +96,45 @@ export interface Quest {
   duration: string;
   focusPoints: string[];
 }
+
+export type QuestStatus = 'not_started' | 'in_progress' | 'completed';
+
+export type MasteryLevel = 'novice' | 'apprentice' | 'adept' | 'master';
+
+export interface QuestProgressRecord {
+  questId: string;
+  questTitle: string;
+  characterId: string;
+  objective: string;
+  objectiveKey: string;
+  status: QuestStatus;
+  lastUpdated: number;
+  lastAssessment?: QuestAssessment;
+  nextSteps: string[];
+}
+
+export interface SubjectProgressRecord {
+  subjectId: string;
+  subjectName: string;
+  totalQuests: number;
+  completedQuests: number;
+  masteryLevel: MasteryLevel;
+  lastUpdated: number;
+  nextSteps: string[];
+  recentQuestTitle?: string;
+}
+
+export interface AchievementBadge {
+  id: string;
+  title: string;
+  description: string;
+  earnedAt: number;
+  questId?: string;
+  subjectId?: string;
+}
+
+export interface StudentProgressSnapshot {
+  quests: Record<string, QuestProgressRecord>;
+  subjects: Record<string, SubjectProgressRecord>;
+  achievements: AchievementBadge[];
+}
